@@ -1,0 +1,24 @@
+Application note. Easy Start: https://www.nxp.com/docs/en/nxp/application-notes/AN133910.pdf
+Firmware manual: https://www.nxp.com/docs/en/user-guide/141520.pdf
+Elechouse manual (not particularly useful): https://www.elechouse.com/elechouse/images/product/PN532_module_V3/PN532_%20Manual_V3.pdf
+elechouse schematics: https://www.elechouse.com/elechouse/images/product/PN532_module_V3/PN532_shematic_drowing.pdf
+
+Adafruit library: https://github.com/adafruit/Adafruit-PN532
+Apparently the chip uses i2c clock stretching. Not sure that's supported needs to be tested.
+
+In SPI mode one has to wait for the sensor to be ready again after getting an ACK.
+https://github.com/adafruit/Adafruit-PN532/blob/master/Adafruit_PN532.cpp#L320
+
+
+16:RX
+17:TX
+
+Adafruit seems to expose the reset pin.
+The elechouse board ties the reset to vcc.
+
+
+Chip starts in vbatmode (or something like that) where it doesn't use power.
+Needs to be woken up, and then changed to run in a mode where it doesn't immediately go to sleep again.
+Might i2c more stable (despite the clock stretching).
+All communication with the device should use timeouts and try again. We don't completely know the
+oscillator frequency and how long the chip might need to wake up. Maybe something we can find out.
