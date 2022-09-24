@@ -132,12 +132,10 @@ class UartCommunication_ extends Communication_:
     // Libnfc claims that this is the wakeup preamble.
     // TODO(florian): find this information in the spec and document it.
     // Found the section: Section 7.2.11.
-    print "Writing long line to wake up"
     writer_.write #[0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
   counter := 0
   write_frame frame/ByteArray -> none:
-    print "writing frame to uart $frame"
     writer_.write frame
 
   read_frame_ max_size/int -> ByteArray:
@@ -145,17 +143,14 @@ class UartCommunication_ extends Communication_:
     // Probably not really necessary, as we don't expect communication errors.
 
     // Peek into the stream to get the size of the frame.
-    print "reading frame from uart ($max_size)"
     frame_data_size := reader_.byte 3
     if  frame_data_size == 0:
       // Ack frame.
       ack := reader_.read_bytes 6
-      print "received ack frame $ack"
       return ack
 
     frame_size := Communication_.HEADER_SIZE_ + frame_data_size + Communication_.FOOTER_SIZE_
     frame := reader_.read_bytes frame_size
-    print "read frame: $frame"
     return frame
 
 /*
@@ -176,7 +171,10 @@ class Pn53x:
 
   static COMMAND_DIAGNOSE_ ::= 0x00
   static COMMAND_GET_FIRMWARE_VERSION_ ::= 0x02
+  static COMMAND_GET_GENERAL_STATUS_ ::= 0x04
   static COMMAND_SAM_CONFIGURATION_ ::= 0x14
+  static COMMAND_IN_DESELECT_ ::= 0x44
+  static COMMAND_IN_LIST_PASSIVE_TARGET_ ::= 0x4A
 
   static POWER_MODE_NORMAL_ ::= 0
   // Only on PN532:
@@ -308,10 +306,8 @@ class Pn53x:
 
     COMMUNICATION_LINE_TEST ::= 0x00
     diagnostic_data := #[COMMUNICATION_LINE_TEST] + data
-    print "sending: $diagnostic_data"
     response := send_command COMMAND_DIAGNOSE_ diagnostic_data --response_size=(data.size + 1)
-    print response
-    return true
+    return diagnostic_data == response
 
   /**
   Runs a self-diagnosis, checking that the ROM is correct.
@@ -335,20 +331,86 @@ class Pn53x:
     response := send_command COMMAND_DIAGNOSE_ #[RAM_TEST] --response_size=1
     return response[0] == 0x00
 
-  get_firmware_version:
+  firmware_version -> FirmwareVersion:
     response := send_command COMMAND_GET_FIRMWARE_VERSION_ #[] --response_size=4
-    if response.size != 4:
-      throw "Unexpected response size: $response.size"
-    print "IC: $response[0] Version: $response[1] Revision: $response[2] Support: $(%x response[3])"
+    return FirmwareVersion response[0] response[1] response[2] response[3]
 
-  send_command command/int data/ByteArray --response_size/int -> ByteArray:
+  general_status -> GeneralStatus:
+    min_response_size := 1 // Error code.
+        + 1  // Field, indicates if an external RF field is present. (1 or 0).
+        + 1  // NbTg, number of targets currently controlled by the PN532 acting as initiator.
+        + 1  // SAM status
+    max_response_size := min_response_size + 2 * 4  // Up to two target infos.
+    response := send_command COMMAND_GET_GENERAL_STATUS_ #[] --max_response_size=max_response_size
+    if response.size < 4: throw "INVALID_RESPONSE"
+    index := 0
+    error_code := response[index++]
+    field_present := response[index++] != 0
+    nb_targets := response[index++]
+    if not 0 <= nb_targets <= 2: throw "Unexpected number of controlled targets $nb_targets"
+    if response.size < min_response_size + nb_targets * 4: throw "INVALID_RESPONSE"
+    target_infos := List nb_targets:
+      logical_number := response[index++]
+      encoded_bit_rate_reception := response[index++]
+      bit_rate_reception/int := ?
+      if encoded_bit_rate_reception == 0x00: bit_rate_reception = 106_000
+      else if encoded_bit_rate_reception == 0x01: bit_rate_reception = 212_000
+      else if encoded_bit_rate_reception == 0x02: bit_rate_reception = 424_000
+      else: throw "Unexpected bit-rate value."
+      encoded_bit_rate_transmission := response[index++]
+      bit_rate_transmission/int := ?
+      if encoded_bit_rate_transmission == 0x00: bit_rate_transmission = 106_000
+      else if encoded_bit_rate_transmission == 0x01: bit_rate_transmission = 212_000
+      else if encoded_bit_rate_transmission == 0x02: bit_rate_transmission = 424_000
+      else: throw "Unexpected bit-rate value."
+      modulation_type := response[index++]
+      TargetInfo logical_number bit_rate_reception bit_rate_transmission modulation_type
+
+    sam_status := SamStatus response[index++]
+
+    return GeneralStatus error_code field_present target_infos sam_status
+
+  // TODO(florian): change name.
+  // I think the meaning is: list of new (in) passive targets.
+  in_list_passive_targets:
+    max_targets := 1
+    baud_rate_modulation_type := 0x00  // Mifare.
+    min_response_size := 1  // NbTg, equal to 0.
+    max_target_data_size := 1 // Target-number
+        + 1   // SEL_RES  (TODO(florian): what is this?). Seems to be 0x08. Probably SAK.
+        + 1   // NFCIDLength
+        + 10  // NFCID  (TODO(florian): is 10 the most we can have?)
+        + 1   // ATS. Seems to be only present when the target requires a RATS.
+    max_response_size := 1  // nbTg, number of initialized targets.
+        + 2 * max_target_data_size
+
+    // Next bytes could be used to specify the UID of the target to look for.
+    response := send_command COMMAND_IN_LIST_PASSIVE_TARGET_
+        #[max_targets, baud_rate_modulation_type]
+        --max_response_size=max_response_size
+
+    return response
+
+  // target_number == 0: deselect all targets.
+  in_deselect --target_number/int -> bool:
+    if not 0 <= target_number <= 2: throw "INVALID_ARGUMENT"
+    response := send_command COMMAND_IN_DESELECT_ #[target_number] --response_size=1
+    print "deselect response code: $response[0]"
+    return response[0] == 0x00
+
+  send_command command/int data/ByteArray --max_response_size/int -> ByteArray:
     frame_data := ByteArray data.size + 2
     frame_data[0] = 0xD4  // Frame identifier (TFI). 0xD4 for system controller to PN532; 0xD5 for responses.
     frame_data[1] = command
     frame_data.replace 2 data
     communication_.write frame_data
     read_ack
-    return read_response command --size=response_size
+    return read_response_ command --max_size=max_response_size
+
+  send_command command/int data/ByteArray --response_size/int -> ByteArray:
+    response := send_command command data --max_response_size=response_size
+    if response.size != response_size: throw "INVALID_RESPONSE"
+    return response
 
   read_ack:
     // print (communication_.read_frame_ 6)
@@ -361,11 +423,102 @@ class Pn53x:
       // TODO(florian: extract error code).
       throw "Error frame: $ack"
 
-  read_response command/int --size/int -> ByteArray:
+  read_response_ command/int --max_size/int -> ByteArray:
     // Responses are prefixed by `0xD5` and the command+1 that was sent.
-    response_size := size + 2
+    response_size := max_size + 2
     data := communication_.read --max_data_size=response_size
-    if data.size != response_size: throw "Unexpected response to $command"
     if data[0] != 0xD5: throw "Unexpected response to $command"
     if data[1] != command + 1: throw "Unexpected response to $command"
     return data[2..]
+
+class FirmwareVersion:
+  ic/int
+  version/int
+  revision/int
+  support/int
+
+  constructor .ic .version .revision .support:
+
+  supports_iso14443_type_a -> bool:
+    return support & 0x01 != 0
+
+  supports_iso14443_type_b -> bool:
+    return support & 0x02 != 0
+
+  supports_is18092 -> bool:
+    return support & 0x04 != 0
+
+  stringify -> string:
+    ic_name/string := ?
+    if ic == 0x32:
+      ic_name = "PN532"
+    else:
+      // TODO(florian): Check if PN533 has ic equal to 0x33
+      ic_name = "Unknown IC: $ic"
+
+    supports_str := ""
+    if supports_iso14443_type_a: supports_str += " ISO14443A"
+    if supports_iso14443_type_b: supports_str += " ISO14443B"
+    if supports_is18092: supports_str += " ISO18092"
+    return "IC: $ic_name, Version: $version, Revision: $revision, Supports:$supports_str"
+
+class GeneralStatus:
+  error_code/int
+  field_present/bool
+  target_infos/List
+  sam_status/SamStatus
+
+  constructor .error_code .field_present .target_infos .sam_status:
+
+  stringify -> string:
+    return "Error code: $error_code, Field present: $field_present, Target infos: $target_infos, SAM status: $sam_status"
+
+class SamStatus:
+  status_bits/int
+
+  constructor .status_bits:
+
+  /**
+  Whether a full negative pulse has been detected on the CLAD line.
+  */
+  negative_pulse_detected -> bool: return status_bits & 0x01 != 0
+
+  /**
+  Whether an external RF field has been detected and switched off during or after a transaction.
+  */
+  external_rf_detected_and_off -> bool: return status_bits & 0x02 != 0
+  /**
+  Whether a timeout has been detected after SigActIRQ has fell down.
+  */
+  timeout_after_sig_act_irg -> bool: return status_bits & 0x04 != 0
+
+  /**
+  The CLAD line level. High if 1, low if 0.
+  */
+  clad_line_level -> int: return status_bits >> 7
+
+  stringify -> string:
+    return "Negative pulse detected: $negative_pulse_detected, External RF detected and off: $external_rf_detected_and_off, Timeout after SigActIRQ: $timeout_after_sig_act_irg, CLAD line level: $clad_line_level"
+
+class TargetInfo:
+  logical_number/int
+  bit_rate_reception/int
+  bit_rate_transmission/int
+  modulation_type/int
+
+  constructor .logical_number .bit_rate_reception .bit_rate_transmission .modulation_type:
+
+  modulation_type_as_string -> string:
+    // User manual, seciton 7.2.3, page 74
+    if modulation_type == 0x00:
+      return "Mifare, Iso14443-3 Type A, Iso14443-3 Type B, Iso18092 passive 106 kpbs"
+    else if modulation_type == 0x10:
+      return "FeliCa, Iso18092 passive 212/424 kpbs"
+    else if modulation_type == 0x01:
+      return "Iso18092 Active mode"
+    else if modulation_type == 0x02:
+      return "Innovision Jewel tag"
+    return "Uknown modulation type"
+
+  stringify -> string:
+    return "Logical number: $logical_number, Bit rate reception: $bit_rate_reception, Bit rate transmission: $bit_rate_transmission, Modulation type: $modulation_type_as_string"

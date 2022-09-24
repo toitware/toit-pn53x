@@ -17,8 +17,21 @@ Adafruit seems to expose the reset pin.
 The elechouse board ties the reset to vcc.
 
 
-Chip starts in vbatmode (or something like that) where it doesn't use power.
-Needs to be woken up, and then changed to run in a mode where it doesn't immediately go to sleep again.
-Might i2c more stable (despite the clock stretching).
 All communication with the device should use timeouts and try again. We don't completely know the
 oscillator frequency and how long the chip might need to wake up. Maybe something we can find out.
+
+add communication.read_ack that also handles error frames.
+My current understanding is that i2c may read more data than is available. This way we can deal with
+  variable-sized frames.
+Also, it seems to be safe to do this, when the device isn't ready. That is, one can read in a loop
+the max amount of bytes and just discard any read data that starts with 0x00. All the remaining bytes
+are then 0x80:
+  #[0x00, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]
+
+It should thus be possible to not have the irq pin and repeatedly read on the i2c bus looking at the
+first byte.
+
+On the serial port that's not the case, but there we are able to correctly read frames.
+However, having a separate read_ack would be nicer.
+
+I haven't looked into i2c yet.

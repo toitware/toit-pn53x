@@ -53,25 +53,30 @@ main:
   // port := uart.Port --rx=(gpio.Pin RX) --tx=(gpio.Pin TX) --baud_rate=115200
   // pn53x := Pn53x.uart port
 
-  using_irc: | pn53x/Pn53x |
-//   using_uart: | pn53x/Pn53x |
+  // using_irc: | pn53x/Pn53x |
+  using_uart: | pn53x/Pn53x |
     pn53x.on
 
-    if not pn53x.self_test --ram: print "ram test failed"
+    if not pn53x.self_test --ram: throw "ram test failed"
     print "RAM SELF TEST PASSED"
 
-    if not pn53x.self_test --rom: print "rom test failed"
+    if not pn53x.self_test --rom: throw "rom test failed"
     print "ROM SELF TEST PASSED"
 
-    pn53x.self_test --communication_line "foo".to_byte_array
+    if not pn53x.self_test --communication_line "foo".to_byte_array:
+      throw "communication line test failed"
     print "COMMUNICATION LINE SELF TEST PASSED"
 
-    while true:
-      print "getting firmware version"
-      pn53x.get_firmware_version
+    print pn53x.firmware_version
 
-      print "getting firmware version again"
-      pn53x.get_firmware_version
-      sleep --ms=1_000
+    print pn53x.general_status
+
+    while true:
+      bytes := pn53x.in_list_passive_targets
+      print "found target: $bytes"
+      deselect_worked := pn53x.in_deselect --target_number=0
+
+//      serial_print_heap_report
+      sleep --ms=100
 
     pn53x.off
