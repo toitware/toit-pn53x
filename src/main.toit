@@ -7,6 +7,7 @@ SDA ::= 16
 SCL ::= 17
 
 IRQ ::= 34
+// IRQ ::= 25
 
 
 using_irc [block]:
@@ -52,8 +53,8 @@ main:
   // port := uart.Port --rx=(gpio.Pin RX) --tx=(gpio.Pin TX) --baud_rate=115200
   // pn53x := Pn53x.uart port
 
-//  using_irc: | pn53x/Pn53x |
-  using_uart: | pn53x/Pn53x |
+  using_irc: | pn53x/Pn53x |
+//   using_uart: | pn53x/Pn53x |
     pn53x.on
 
     if not pn53x.self_test --ram: print "ram test failed"
