@@ -71,12 +71,17 @@ main:
 
     print pn53x.general_status
 
+    print "Waiting for cards..."
     while true:
       bytes := pn53x.in_list_passive_targets
       print "found target: $bytes"
       deselect_worked := pn53x.in_deselect --target_number=0
 
 //      serial_print_heap_report
-      sleep --ms=100
+      print "powering down for 1000ms"
+      pn53x.power_down
+      sleep --ms=1000
+      print "waking up"
+      pn53x.wakeup
 
     pn53x.off

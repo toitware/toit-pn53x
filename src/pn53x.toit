@@ -18,6 +18,13 @@ abstract class Communication_:
 
   abstract read_frame_ max_size/int -> ByteArray
   abstract write_frame frame/ByteArray
+
+  /**
+  # Inheritance
+  Note that the Wakeup time depends on the oscillator, but according to
+    the User manual (UM0701-02), section 7.2.11, page 100, footnote, it's less than
+    2ms when using an appropriate quartz and layout.
+  */
   abstract wakeup
 
   frame_size_ data/ByteArray:
@@ -173,6 +180,7 @@ class Pn53x:
   static COMMAND_GET_FIRMWARE_VERSION_ ::= 0x02
   static COMMAND_GET_GENERAL_STATUS_ ::= 0x04
   static COMMAND_SAM_CONFIGURATION_ ::= 0x14
+  static COMMAND_POWER_DOWN_ ::= 0x16
   static COMMAND_IN_DESELECT_ ::= 0x44
   static COMMAND_IN_LIST_PASSIVE_TARGET_ ::= 0x4A
 
@@ -248,6 +256,9 @@ class Pn53x:
   wakeup:
     // Wakeup the chip so we can communicate with it.
     // It's safe to do this even if the chip is already awake.
+    //   Note that the Wakeup time depends on the oscillator, but according to
+    // the User manual (UM0701-02), section 7.2.11, page 100, footnote, it's less than
+    // 2ms when using an appropriate quartz and layout.
     communication_.wakeup
 
     if power_mode_ == POWER_MODE_LOW_VBAT_:
@@ -256,6 +267,29 @@ class Pn53x:
       // See user manual 141520, Rev. 02. Section 3.1.3.3, page 13.
       set_sam_configuration_ SAM_MODE_NORMAL_
     power_mode_ = POWER_MODE_NORMAL_
+
+  power_down:
+    WAKEUP_I2C ::= 0x80
+    WAKEUP_GPIO ::= 0x40
+    WAKEUP_SPI ::= 0x20
+    WAKEUP_UART ::= 0x10
+    WAKEUP_RF ::= 0x08
+    WAKEUP_INT1 ::= 0x02
+    WAKEUP_INT0 ::= 0x01
+
+    wakeup_enable_bits := WAKEUP_I2C | WAKEUP_SPI | WAKEUP_UART
+
+    // The power down command can only have an additional "generate-irq" byte which
+    // can be used if $WAKEUP_RF is enabled.
+
+    data := #[wakeup_enable_bits]
+    response := send_command COMMAND_POWER_DOWN_ data --response_size=1
+    if response[0] != 0x00:
+      throw (Pn53xException response[0])
+
+    power_mode_ = POWER_MODE_POWER_DOWN_
+    // The chip needs ~1ms to go into power down mode during which no command should be sent.
+    sleep --ms=1
 
   /**
   Configures the SAM (Security Access Module).
@@ -370,6 +404,9 @@ class Pn53x:
 
     return GeneralStatus error_code field_present target_infos sam_status
 
+  parse_error_byte_ byte/int:
+
+
   // TODO(florian): change name.
   // I think the meaning is: list of new (in) passive targets.
   in_list_passive_targets:
@@ -403,6 +440,8 @@ class Pn53x:
     frame_data[0] = 0xD4  // Frame identifier (TFI). 0xD4 for system controller to PN532; 0xD5 for responses.
     frame_data[1] = command
     frame_data.replace 2 data
+    if power_mode_ != POWER_MODE_NORMAL_:
+      communication_.wakeup
     communication_.write frame_data
     read_ack
     return read_response_ command --max_size=max_response_size
@@ -471,7 +510,8 @@ class GeneralStatus:
   constructor .error_code .field_present .target_infos .sam_status:
 
   stringify -> string:
-    return "Error code: $error_code, Field present: $field_present, Target infos: $target_infos, SAM status: $sam_status"
+    error_string := Pn53xException.error_code_to_string error_code
+    return "Error code: $error_string, Field present: $field_present, Target infos: $target_infos, SAM status: $sam_status"
 
 class SamStatus:
   status_bits/int
@@ -522,3 +562,56 @@ class TargetInfo:
 
   stringify -> string:
     return "Logical number: $logical_number, Bit rate reception: $bit_rate_reception, Bit rate transmission: $bit_rate_transmission, Modulation type: $modulation_type_as_string"
+
+class Pn53xException:
+  static error_code_to_string code/int -> string:
+    code &= 0x3F
+    if code == 0x00: return "No error"
+    if code == 0x01: return "Time Out"
+    if code == 0x02: return "CRC error"
+    if code == 0x03: return "Parity error"
+    if code == 0x04: return "Collision error"
+    if code == 0x05: return "Framing error during Mifare operation"
+    if code == 0x06: return "Abnormal bit-ocllision during bit-wise anticollision at 106 kbps"
+    if code == 0x07: return "Communication buffer size insufficient"
+    if code == 0x09: return "RF buffer overflow" // Bit BufferOvfl of the register CIO_Error.
+    if code == 0x0A: return "RF Field not switched on in time"
+    if code == 0x0B: return "RF Protocol error"
+    if code == 0x0D: return "Temperature error. Overheating detected."
+    if code == 0x0E: return "Internal buffer overflow"
+    if code == 0x10: return "Invalid parameter"
+    if code == 0x12: return "Operation not supported" // DEP protocol.
+    // DEP, Mifare or ISO/IEC14443-4 protocol.
+    // Can be
+    // - bad length of the RF received frame,
+    // - incorrect value of PCB or PFB.
+    // - invalid or unexpected RF received frame.
+    // - NAD or DID incoherenec.
+    if code == 0x13: return "Data format does not match specification"
+    if code == 0x14: return "Mifare - Authentication error"
+    if code == 0x23: return "UID check byte is wrong" // ISO/IEC14443-3.
+    if code == 0x25: return "Invalid device state" // DEP protocol.
+    if code == 0x26: return "Operation not allowed in this configuration"
+    // Reasons for the following error:
+    // Initiator vs Target, unknown target number, target not in the good state, ...
+    if code == 0x27: return "Unacceptable command due to context of the PN532"
+    if code == 0x29: return "PN53x configured as target has been released by initiator"
+    // PN532 and ISO/IEC14443-3B only:
+    // Means that the card has been exchanged with another one.
+    if code == 0x2A: return "ID of card doesn't match"
+    // PN532 and ISO/IEC14443-3B only:
+    if code == 0x2B: return "Card has been removed"
+    // In DEP 212/424 kpbs passive:
+    if code == 0x2C: return "Mismatch between NFCID3 initiator and target"
+    if code == 0x2D: return "Over-current event has been detected"
+    if code == 0x2E: return "NAD missing in DEP frame"
+    throw "Unknown error code: $code"
+
+  error_code/int
+
+  constructor .error_code:
+
+  stringify -> string:
+    result := "Error $error_code - "
+    result += error_code_to_string error_code
+    return result
