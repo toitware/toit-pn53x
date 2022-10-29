@@ -1,3 +1,4 @@
+User manual: https://www.nxp.com/docs/en/user-guide/141520.pdf
 Application note. Easy Start: https://www.nxp.com/docs/en/nxp/application-notes/AN133910.pdf
 Firmware manual: https://www.nxp.com/docs/en/user-guide/141520.pdf
 Elechouse manual (not particularly useful): https://www.elechouse.com/elechouse/images/product/PN532_module_V3/PN532_%20Manual_V3.pdf

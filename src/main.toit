@@ -57,31 +57,71 @@ main:
   using_uart: | pn53x/Pn53x |
     pn53x.on
 
-    if not pn53x.self_test --ram: throw "ram test failed"
+    /*
+    if not pn53x.miscellaneous.self_test --ram: throw "ram test failed"
     print "RAM SELF TEST PASSED"
 
-    if not pn53x.self_test --rom: throw "rom test failed"
+    if not pn53x.miscellaneous.self_test --rom: throw "rom test failed"
     print "ROM SELF TEST PASSED"
 
-    if not pn53x.self_test --communication_line "foo".to_byte_array:
+    if not pn53x.miscellaneous.self_test --communication_line "foo".to_byte_array:
       throw "communication line test failed"
     print "COMMUNICATION LINE SELF TEST PASSED"
 
-    print pn53x.firmware_version
+    print pn53x.miscellaneous.firmware_version
 
-    print pn53x.general_status
+    print pn53x.miscellaneous.general_status
+    */
 
     print "Waiting for cards..."
     while true:
-      bytes := pn53x.in_list_passive_targets
+      bytes := pn53x.initiator.list_passive_targets
       print "found target: $bytes"
-      deselect_worked := pn53x.in_deselect --target_number=0
+      uid := bytes[6..]
+
+      card := MifareCard pn53x uid
+      for i := 63; i >= 0; i--:
+        is_first_block_in_sector := (i + 1) % 4 == 0
+        if is_first_block_in_sector:
+          exception := catch: card.authenticate --block=i
+          if exception:
+            print "Sector $i encrypted"
+            print "Communication with card is compromised"
+            break
+        print (card.read --block=i)
+      deselect_worked := pn53x.initiator.deselect --target_number=0
 
 //      serial_print_heap_report
       print "powering down for 1000ms"
-      pn53x.power_down
+      pn53x.power.power_down
       sleep --ms=1000
       print "waking up"
-      pn53x.wakeup
+      pn53x.power.wakeup
 
     pn53x.off
+
+class MifareCard:
+  pn53x_/Pn53x
+  uid/ByteArray
+
+  constructor .pn53x_ .uid:
+
+  /** Default key for Mifare cards. */
+  static DEFAULT_KEY := #[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+
+  authenticate --block/int key/ByteArray=DEFAULT_KEY:
+    MIFARE_CMD_AUTH_A_ ::= 0x60
+    MIFARE_CMD_AUTH_B_ ::= 0x61
+    data := #[MIFARE_CMD_AUTH_A_, block]  // Target 1.
+    data += key
+    data += uid
+    pn53x_.initiator.data_exchange data --target_number=1 --max_response_size=0
+
+  read --block/int:
+    // TODO(florian): check validity of block.
+    MIFARE_READ ::= 0x30
+    // TODO(florian): we probably don't need the "0x00" at the end.
+    // In the MFRC522 library, they are used to store the CRC (bad API).
+    bytes := #[ MIFARE_READ, block, 0x00, 0x00]
+    result := pn53x_.initiator.data_exchange bytes --target_number=1 --max_response_size=16
+    return result

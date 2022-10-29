@@ -166,130 +166,68 @@ class SpiCommunication_ extends Communication_:
     // TODO(florian): Adafruit claims that they have to do a dummy command to get synced
     // up in SPI mode.
     // I'm assuming that's to wake the device up.
+
+    // Documentation (application note 153710) says:
+    // Set NSS low during 1 ms (can be less depending on the quartz)
 */
 
-class Pn53x:
-  /**
-  The I2C address of the PN53x.
-  Note that the user manual lists the address as 0x48, which corresponds to the shifted address.
-  */
-  static I2C_ADDRESS ::= 0x24
-  static I2C_MAX_SPEED ::= 400_000
+class Initiator:
+  static COMMAND_DATA_EXCHANGE_ ::= 0x40
+  static COMMAND_DESELECT_ ::= 0x44
+  static COMMAND_LIST_PASSIVE_TARGET_ ::= 0x4A
 
+  pn53x_/Pn53x
+
+  constructor .pn53x_:
+
+  list_passive_targets:
+    max_targets := 1
+    baud_rate_modulation_type := 0x00  // Mifare.
+    min_response_size := 1  // NbTg, equal to 0.
+    max_target_data_size := 1 // Target-number
+        + 1   // SEL_RES  (TODO(florian): what is this?). Seems to be 0x08. Probably SAK.
+        + 1   // NFCIDLength
+        + 10  // NFCID  (TODO(florian): is 10 the most we can have?)
+        + 1   // ATS. Seems to be only present when the target requires a RATS.
+    max_response_size := 1  // nbTg, number of initialized targets.
+        + 2 * max_target_data_size
+
+    // Next bytes could be used to specify the UID of the target to look for.
+    response := pn53x_.send_command_ COMMAND_LIST_PASSIVE_TARGET_
+        #[max_targets, baud_rate_modulation_type]
+        --max_response_size=max_response_size
+
+    return response
+
+  // target_number == 0: deselect all targets.
+  deselect --target_number/int -> bool:
+    if not 0 <= target_number <= 2: throw "INVALID_ARGUMENT"
+    response := pn53x_.send_command_ COMMAND_DESELECT_ #[target_number] --response_size=1
+    print "deselect response code: $response[0]"
+    return response[0] == 0x00
+
+  data_exchange data/ByteArray --target_number/int --max_response_size=-1 -> ByteArray:
+    if not 0 <= target_number <= 2: throw "INVALID_ARGUMENT"
+    command_data := #[target_number ] + data
+    response := pn53x_.send_command_ COMMAND_DATA_EXCHANGE_ command_data --max_response_size=(1 + max_response_size)
+    status := response[0]
+    if status != 0x00: throw (Pn53xException status)
+    return response[1..]
+
+class Miscellaneous:
   static COMMAND_DIAGNOSE_ ::= 0x00
   static COMMAND_GET_FIRMWARE_VERSION_ ::= 0x02
   static COMMAND_GET_GENERAL_STATUS_ ::= 0x04
   static COMMAND_SAM_CONFIGURATION_ ::= 0x14
-  static COMMAND_POWER_DOWN_ ::= 0x16
-  static COMMAND_IN_DESELECT_ ::= 0x44
-  static COMMAND_IN_LIST_PASSIVE_TARGET_ ::= 0x4A
-
-  static POWER_MODE_NORMAL_ ::= 0
-  // Only on PN532:
-  /**
-  The chip is powered down and needs to be woken up using $Communication_.wakeup.
-  */
-  static POWER_MODE_POWER_DOWN_ ::= 1
-  /**
-  The chip is powered down and needs to be woken up using $Communication_.wakeup.
-  To avoid it going back to sleep, the SAMConfiguration command needs to be sent as well.
-  */
-  static POWER_MODE_LOW_VBAT_ ::= 2
 
   static SAM_MODE_NORMAL_ ::= 0x01
   static SAM_MODE_VIRTUAL_CARD_ ::= 0x02
   static SAM_MODE_WIRED_CARD_ ::= 0x03
   static SAM_MODE_DUAL_CARD_ ::= 0x04
 
-  static CHIP_PN532_ ::= 0x00
-  static CHIP_PN533_ ::= 0x01
+  pn53x_/Pn53x
 
-  // TODO(florian): test with PN533 as well.
-  chip_type_/int ::= CHIP_PN532_
-
-  communication_/Communication_
-  reset_pin_/gpio.Pin?
-
-  /**
-  The current power mode of the device.
-
-  If null, then the device was not turned on yet (see $on).
-
-  We assume that the device is reset when an instance of this class is created.
-    As such, the initial power mode is $POWER_MODE_LOW_VBAT_.
-
-  User manual 141520, Rev. 02. Section 3.1.3.3, page 13.
-  */
-  power_mode_/int? := null
-
-  constructor.uart port/uart.Port --reset/gpio.Pin?=null:
-    communication_ = UartCommunication_ port
-    reset_pin_ = reset
-
-  constructor.i2c device/i2c.Device --irq/gpio.Pin --reset/gpio.Pin?=null:
-    communication_ = I2cCommunication_ device irq
-    reset_pin_ = reset
-
-  on:
-    reset_
-    wakeup
-
-  /**
-  Resets the device if a reset pin was given.
-  */
-  reset_:
-    if reset_pin_:
-      reset_pin_.set 0
-      sleep --ms=10
-      reset_pin_.set 1
-
-    power_mode_ = (chip_type_ == CHIP_PN532_) ? POWER_MODE_LOW_VBAT_ : POWER_MODE_NORMAL_
-
-    // TODO(florian): we are waiting 10ms here, to be sure that the device is ready.
-    // We don't need to do this, if the board was powered on earlier and no reset pin
-    // was given.
-    sleep --ms=10
-
-  off:
-    // TODO(florian): send powerdown command.
-
-  wakeup:
-    // Wakeup the chip so we can communicate with it.
-    // It's safe to do this even if the chip is already awake.
-    //   Note that the Wakeup time depends on the oscillator, but according to
-    // the User manual (UM0701-02), section 7.2.11, page 100, footnote, it's less than
-    // 2ms when using an appropriate quartz and layout.
-    communication_.wakeup
-
-    if power_mode_ == POWER_MODE_LOW_VBAT_:
-      // Switch to normal mode.
-      // This is done by sending a SAMConfiguration command.
-      // See user manual 141520, Rev. 02. Section 3.1.3.3, page 13.
-      set_sam_configuration_ SAM_MODE_NORMAL_
-    power_mode_ = POWER_MODE_NORMAL_
-
-  power_down:
-    WAKEUP_I2C ::= 0x80
-    WAKEUP_GPIO ::= 0x40
-    WAKEUP_SPI ::= 0x20
-    WAKEUP_UART ::= 0x10
-    WAKEUP_RF ::= 0x08
-    WAKEUP_INT1 ::= 0x02
-    WAKEUP_INT0 ::= 0x01
-
-    wakeup_enable_bits := WAKEUP_I2C | WAKEUP_SPI | WAKEUP_UART
-
-    // The power down command can only have an additional "generate-irq" byte which
-    // can be used if $WAKEUP_RF is enabled.
-
-    data := #[wakeup_enable_bits]
-    response := send_command COMMAND_POWER_DOWN_ data --response_size=1
-    if response[0] != 0x00:
-      throw (Pn53xException response[0])
-
-    power_mode_ = POWER_MODE_POWER_DOWN_
-    // The chip needs ~1ms to go into power down mode during which no command should be sent.
-    sleep --ms=1
+  constructor .pn53x_:
 
   /**
   Configures the SAM (Security Access Module).
@@ -304,7 +242,7 @@ class Pn53x:
     if timeout or mode == SAM_MODE_VIRTUAL_CARD_: throw "UNIMPLEMENTED"
     // In theory we could also take over the P70_IRQ pin, but we don't need that yet.
     data := #[mode]
-    send_command COMMAND_SAM_CONFIGURATION_ data --response_size=0
+    pn53x_.send_command_ COMMAND_SAM_CONFIGURATION_ data --response_size=0
 
   /*
   // TODO(florian): can't find good parameters for this.
@@ -322,7 +260,7 @@ class Pn53x:
 
     if not antenna: throw "INVALID_ARGUMENT"
     ANTENNA_TEST ::= 0x07
-    response := send_command COMMAND_DIAGNOSE #[ANTENNA_TEST] --response_size=1
+    response := send_command_ COMMAND_DIAGNOSE #[ANTENNA_TEST] --response_size=1
     return response[0] == 0x00
   */
 
@@ -340,7 +278,7 @@ class Pn53x:
 
     COMMUNICATION_LINE_TEST ::= 0x00
     diagnostic_data := #[COMMUNICATION_LINE_TEST] + data
-    response := send_command COMMAND_DIAGNOSE_ diagnostic_data --response_size=(data.size + 1)
+    response := pn53x_.send_command_ COMMAND_DIAGNOSE_ diagnostic_data --response_size=(data.size + 1)
     return diagnostic_data == response
 
   /**
@@ -351,7 +289,7 @@ class Pn53x:
   self_test --rom/bool -> bool:
     if not rom: throw "INVALID_ARGUMENT"
     ROM_TEST ::= 0x01
-    response := send_command COMMAND_DIAGNOSE_ #[ROM_TEST] --response_size=1
+    response := pn53x_.send_command_ COMMAND_DIAGNOSE_ #[ROM_TEST] --response_size=1
     return response[0] == 0x00
 
   /**
@@ -362,11 +300,11 @@ class Pn53x:
   self_test --ram/bool -> bool:
     if not ram: throw "INVALID_ARGUMENT"
     RAM_TEST ::= 0x02
-    response := send_command COMMAND_DIAGNOSE_ #[RAM_TEST] --response_size=1
+    response := pn53x_.send_command_ COMMAND_DIAGNOSE_ #[RAM_TEST] --response_size=1
     return response[0] == 0x00
 
   firmware_version -> FirmwareVersion:
-    response := send_command COMMAND_GET_FIRMWARE_VERSION_ #[] --response_size=4
+    response := pn53x_.send_command_ COMMAND_GET_FIRMWARE_VERSION_ #[] --response_size=4
     return FirmwareVersion response[0] response[1] response[2] response[3]
 
   general_status -> GeneralStatus:
@@ -375,7 +313,7 @@ class Pn53x:
         + 1  // NbTg, number of targets currently controlled by the PN532 acting as initiator.
         + 1  // SAM status
     max_response_size := min_response_size + 2 * 4  // Up to two target infos.
-    response := send_command COMMAND_GET_GENERAL_STATUS_ #[] --max_response_size=max_response_size
+    response := pn53x_.send_command_ COMMAND_GET_GENERAL_STATUS_ #[] --max_response_size=max_response_size
     if response.size < 4: throw "INVALID_RESPONSE"
     index := 0
     error_code := response[index++]
@@ -404,38 +342,140 @@ class Pn53x:
 
     return GeneralStatus error_code field_present target_infos sam_status
 
-  parse_error_byte_ byte/int:
+class Power:
+  static COMMAND_POWER_DOWN_ ::= 0x16
 
+  pn53x_/Pn53x
 
-  // TODO(florian): change name.
-  // I think the meaning is: list of new (in) passive targets.
-  in_list_passive_targets:
-    max_targets := 1
-    baud_rate_modulation_type := 0x00  // Mifare.
-    min_response_size := 1  // NbTg, equal to 0.
-    max_target_data_size := 1 // Target-number
-        + 1   // SEL_RES  (TODO(florian): what is this?). Seems to be 0x08. Probably SAK.
-        + 1   // NFCIDLength
-        + 10  // NFCID  (TODO(florian): is 10 the most we can have?)
-        + 1   // ATS. Seems to be only present when the target requires a RATS.
-    max_response_size := 1  // nbTg, number of initialized targets.
-        + 2 * max_target_data_size
+  constructor .pn53x_:
 
-    // Next bytes could be used to specify the UID of the target to look for.
-    response := send_command COMMAND_IN_LIST_PASSIVE_TARGET_
-        #[max_targets, baud_rate_modulation_type]
-        --max_response_size=max_response_size
+  wakeup:
+    // Wakeup the chip so we can communicate with it.
+    // It's safe to do this even if the chip is already awake.
+    //   Note that the Wakeup time depends on the oscillator, but according to
+    // the User manual (UM0701-02), section 7.2.11, page 100, footnote, it's less than
+    // 2ms when using an appropriate quartz and layout.
+    pn53x_.communication_.wakeup
 
-    return response
+    if pn53x_.power_mode_ == Pn53x.POWER_MODE_LOW_VBAT_:
+      // Switch to normal mode.
+      // This is done by sending a SAMConfiguration command.
+      // See user manual 141520, Rev. 02. Section 3.1.3.3, page 13.
+      pn53x_.miscellaneous.set_sam_configuration_ Miscellaneous.SAM_MODE_NORMAL_
+    pn53x_.power_mode_ = Pn53x.POWER_MODE_NORMAL_
 
-  // target_number == 0: deselect all targets.
-  in_deselect --target_number/int -> bool:
-    if not 0 <= target_number <= 2: throw "INVALID_ARGUMENT"
-    response := send_command COMMAND_IN_DESELECT_ #[target_number] --response_size=1
-    print "deselect response code: $response[0]"
-    return response[0] == 0x00
+  power_down:
+    WAKEUP_I2C ::= 0x80
+    WAKEUP_GPIO ::= 0x40
+    WAKEUP_SPI ::= 0x20
+    WAKEUP_UART ::= 0x10
+    WAKEUP_RF ::= 0x08
+    WAKEUP_INT1 ::= 0x02
+    WAKEUP_INT0 ::= 0x01
 
-  send_command command/int data/ByteArray --max_response_size/int -> ByteArray:
+    wakeup_enable_bits := WAKEUP_I2C | WAKEUP_SPI | WAKEUP_UART
+
+    // The power down command can only have an additional "generate-irq" byte which
+    // can be used if $WAKEUP_RF is enabled.
+
+    data := #[wakeup_enable_bits]
+    response := pn53x_.send_command_ COMMAND_POWER_DOWN_ data --response_size=1
+    if response[0] != 0x00:
+      throw (Pn53xException response[0])
+
+    pn53x_.power_mode_ = Pn53x.POWER_MODE_POWER_DOWN_
+    // The chip needs ~1ms to go into power down mode during which no command should be sent.
+    sleep --ms=1
+
+class Pn53x:
+  /**
+  The I2C address of the PN53x.
+  Note that the user manual lists the address as 0x48, which corresponds to the shifted address.
+  */
+  static I2C_ADDRESS ::= 0x24
+  static I2C_MAX_SPEED ::= 400_000
+
+  static POWER_MODE_NORMAL_ ::= 0
+  // Only on PN532:
+  /**
+  The chip is powered down and needs to be woken up using $Communication_.wakeup.
+  */
+  static POWER_MODE_POWER_DOWN_ ::= 1
+  /**
+  The chip is powered down and needs to be woken up using $Communication_.wakeup.
+  To avoid it going back to sleep, the SAMConfiguration command needs to be sent as well.
+  */
+  static POWER_MODE_LOW_VBAT_ ::= 2
+
+  static CHIP_PN532_ ::= 0x00
+  static CHIP_PN533_ ::= 0x01
+
+  // TODO(florian): test with PN533 as well.
+  chip_type_/int ::= CHIP_PN532_
+
+  communication_/Communication_
+  reset_pin_/gpio.Pin?
+
+  /**
+  The current power mode of the device.
+
+  If null, then the device was not turned on yet (see $on).
+
+  We assume that the device is reset when an instance of this class is created.
+    As such, the initial power mode is $POWER_MODE_LOW_VBAT_.
+
+  User manual 141520, Rev. 02. Section 3.1.3.3, page 13.
+  */
+  power_mode_/int? := null
+
+  miscellaneous_/Miscellaneous? := null
+  initiator_/Initiator? := null
+  power_/Power? := null
+
+  constructor.uart port/uart.Port --reset/gpio.Pin?=null:
+    communication_ = UartCommunication_ port
+    reset_pin_ = reset
+
+  constructor.i2c device/i2c.Device --irq/gpio.Pin --reset/gpio.Pin?=null:
+    communication_ = I2cCommunication_ device irq
+    reset_pin_ = reset
+
+  on:
+    reset_
+    power.wakeup
+
+  /**
+  Resets the device if a reset pin was given.
+  */
+  reset_:
+    if reset_pin_:
+      reset_pin_.set 0
+      sleep --ms=10
+      reset_pin_.set 1
+
+    power_mode_ = (chip_type_ == CHIP_PN532_) ? POWER_MODE_LOW_VBAT_ : POWER_MODE_NORMAL_
+
+    // TODO(florian): we are waiting 10ms here, to be sure that the device is ready.
+    // We don't need to do this, if the board was powered on earlier and no reset pin
+    // was given.
+    sleep --ms=10
+
+  off:
+    // TODO(florian): send powerdown command.
+
+  miscellaneous -> Miscellaneous:
+    if not miscellaneous_: miscellaneous_ = Miscellaneous this
+    return miscellaneous_
+
+  initiator -> Initiator:
+    if not initiator_: initiator_ = Initiator this
+    return initiator_
+
+  power -> Power:
+    if not power_: power_ = Power this
+    return power_
+
+  send_command_ command/int data/ByteArray --max_response_size/int -> ByteArray:
     frame_data := ByteArray data.size + 2
     frame_data[0] = 0xD4  // Frame identifier (TFI). 0xD4 for system controller to PN532; 0xD5 for responses.
     frame_data[1] = command
@@ -443,15 +483,15 @@ class Pn53x:
     if power_mode_ != POWER_MODE_NORMAL_:
       communication_.wakeup
     communication_.write frame_data
-    read_ack
+    read_ack_
     return read_response_ command --max_size=max_response_size
 
-  send_command command/int data/ByteArray --response_size/int -> ByteArray:
-    response := send_command command data --max_response_size=response_size
+  send_command_ command/int data/ByteArray --response_size/int -> ByteArray:
+    response := send_command_ command data --max_response_size=response_size
     if response.size != response_size: throw "INVALID_RESPONSE"
     return response
 
-  read_ack:
+  read_ack_:
     // print (communication_.read_frame_ 6)
     // return
     // An ack-frame doesn't have any data, but we could also receive an
@@ -466,8 +506,8 @@ class Pn53x:
     // Responses are prefixed by `0xD5` and the command+1 that was sent.
     response_size := max_size + 2
     data := communication_.read --max_data_size=response_size
-    if data[0] != 0xD5: throw "Unexpected response to $command"
-    if data[1] != command + 1: throw "Unexpected response to $command"
+    if data[0] != 0xD5: throw "Unexpected response to $command: $data"
+    if data[1] != command + 1: throw "Unexpected response to $command: $data"
     return data[2..]
 
 class FirmwareVersion:
@@ -583,10 +623,11 @@ class Pn53xException:
     if code == 0x12: return "Operation not supported" // DEP protocol.
     // DEP, Mifare or ISO/IEC14443-4 protocol.
     // Can be
+    // - bad Mifare key
     // - bad length of the RF received frame,
     // - incorrect value of PCB or PFB.
     // - invalid or unexpected RF received frame.
-    // - NAD or DID incoherenec.
+    // - NAD or DID incoherence.
     if code == 0x13: return "Data format does not match specification"
     if code == 0x14: return "Mifare - Authentication error"
     if code == 0x23: return "UID check byte is wrong" // ISO/IEC14443-3.
